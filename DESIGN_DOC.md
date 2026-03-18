@@ -1,29 +1,29 @@
-# Multi-Agent Insurance Chatbot — Design Document
+# Multi-Agent Insurance Chatbot: Design Document
 
 ## 1. Problem Statement
 
-Design a multi-agent system that powers a customer-facing insurance chatbot. The system must:
+The goal is to design a multi-agent system that powers a customer-facing insurance chatbot. The system should:
 
 - Answer customer queries about policies, claims, billing, and general insurance topics
 - Support both **authenticated (logged-in)** and **anonymous (logged-out)** users
-- Leverage short-term and long-term memory for personalized experiences
-- Be read-only — no action-taking (e.g., filing claims, making payments)
-- Gracefully handle edge cases: off-topic queries, low-confidence answers, and compliance-sensitive responses
+- Use short-term and long-term memory for personalized experiences
+- Remain read-only, meaning no action-taking (filing claims, making payments, etc.)
+- Handle edge cases well: off-topic queries, low-confidence answers, and compliance-sensitive responses
 
-The system is **tech-stack agnostic** — the design should be implementable in any language/framework.
+The design is tech-stack agnostic and should be implementable in any language or framework.
 
 ---
 
 ## 2. Why Multi-Agent?
 
-A single monolithic LLM call could technically answer questions, but it leads to:
+A single monolithic LLM call could technically answer questions, but it creates problems:
 
-- **Bloated system prompts** — one prompt trying to cover policy, claims, FAQ, and routing logic
-- **Poor specialization** — the model can't be tuned/optimized per domain
-- **Difficult guardrails** — compliance rules differ between claims vs. general FAQ
-- **No observability** — you can't tell which "capability" failed when things go wrong
+- **Bloated system prompts** where one prompt tries to cover policy, claims, FAQ, and routing logic all at once
+- **Poor specialization** since the model can't be tuned or optimized per domain
+- **Difficult guardrails** because compliance rules differ between claims vs. general FAQ
+- **No observability** since you can't tell which capability failed when things go wrong
 
-A multi-agent architecture gives us **separation of concerns**, **independent tunability**, and **clear failure boundaries**.
+A multi-agent architecture gives us separation of concerns, independent tunability, and clear failure boundaries. Each agent owns a well-defined slice of the problem, making it easier to debug, improve, and scale individual components.
 
 ---
 
@@ -31,77 +31,19 @@ A multi-agent architecture gives us **separation of concerns**, **independent tu
 
 ### 3.1 High-Level Component Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Client (Web/Mobile)                         │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                               ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     API Gateway / Chat Interface                     │
-│              (Auth check, session management, rate limiting)         │
-└──────────────────────────────┬──────────────────────────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │   Input Guardrails   │
-                    │  (PII, injection,    │
-                    │   off-topic filter)  │
-                    └──────────┬──────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │    Orchestrator /    │
-                    │    Router Agent      │◄────── Short-term Memory
-                    │  (intent + routing)  │◄────── Long-term Memory (if authed)
-                    └──┬───────┬───────┬──┘
-                       │       │       │
-              ┌────────▼┐  ┌──▼────┐  ┌▼────────┐
-              │ Policy   │  │Claims │  │ FAQ /   │
-              │ Agent    │  │Agent  │  │ General │
-              │(+billing)│  │       │  │ Agent   │
-              └────┬─────┘  └──┬────┘  └──┬──────┘
-                   │           │          │
-          ┌────────▼───────────▼──────────▼───────┐
-          │          Knowledge / Data Layer         │
-          │  ┌─────────────┐  ┌──────────────────┐ │
-          │  │ Knowledge    │  │ Customer Data    │ │
-          │  │ Base (RAG)   │  │ Layer (authed    │ │
-          │  │ (all users)  │  │ users only)      │ │
-          │  └─────────────┘  └──────────────────┘ │
-          └────────────────────────────────────────┘
-                               │
-                    ┌──────────▼──────────┐
-                    │  Output Guardrails   │
-                    │ (hallucination check,│
-                    │  disclaimers,        │
-                    │  compliance filter)  │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │   Response to User   │
-                    └─────────────────────┘
-
-        ┌───────────────────────────────────────────┐
-        │           Cross-cutting Concerns           │
-        │  ┌─────────────┐  ┌─────────────────────┐ │
-        │  │ Observability│  │  Human Handoff      │ │
-        │  │ (traces,logs,│  │  (escalation to     │ │
-        │  │  metrics)    │  │   live agent)       │ │
-        │  └─────────────┘  └─────────────────────┘ │
-        └───────────────────────────────────────────┘
-```
+![System Architecture](./architecture.svg)
 
 ### 3.2 Request Lifecycle
 
-A user query goes through the following steps:
+Here's how a user query flows through the system:
 
 1. **Client** sends a message via the chat interface
-2. **API Gateway** authenticates the request, creates/resumes a session
+2. **API Gateway** authenticates the request, creates or resumes a session
 3. **Input Guardrails** scan the query for prompt injection, PII leakage, and off-topic content
 4. **Orchestrator/Router Agent** receives the sanitized query along with:
    - Auth state (logged-in or anonymous)
    - Short-term memory (recent conversation context)
-   - Long-term memory (if authenticated — past interactions, user profile summary)
+   - Long-term memory (if authenticated, includes past interactions and user profile summary)
 5. Router **classifies intent** and **selects the specialist agent** (Policy, Claims, or FAQ)
 6. **Specialist Agent** processes the query using:
    - Knowledge Base (RAG) for document-grounded answers
@@ -116,13 +58,13 @@ A user query goes through the following steps:
 
 ### 4.1 Orchestrator / Router Agent
 
-**Role:** The entry point for every query. Classifies user intent and routes to the appropriate specialist agent.
+**Role:** The entry point for every query. It classifies user intent and routes to the appropriate specialist agent.
 
 **How it works:**
 - Takes the user query + conversation context (short-term memory) + user profile (long-term memory, if available)
 - Classifies intent into categories: `policy`, `claims`, `billing`, `general/faq`, `out-of-scope`, `needs-human`
 - Routes to the appropriate specialist agent
-- If auth is required but user is logged out, responds with a prompt to log in (e.g., "I can look up your specific policy details if you log in")
+- If auth is required but the user is logged out, it responds with a prompt to log in (e.g., "I can look up your specific policy details if you log in")
 
 **Auth-aware routing logic:**
 
@@ -135,10 +77,10 @@ A user query goes through the following steps:
 | Out-of-scope | Decline gracefully | Decline gracefully |
 | Frustrated / confused | Human handoff | Human handoff |
 
-**Tradeoff — LLM-based routing vs. classifier model:**
-- LLM-based: More flexible, understands nuance, but slower and costlier per request
-- Trained classifier (e.g., fine-tuned small model): Faster, cheaper, but needs labeled training data and handles edge cases poorly
-- **Recommendation:** Start with LLM-based routing (simpler to build, easier to iterate). Move to a hybrid (classifier for common intents + LLM fallback for ambiguous ones) once you have traffic data.
+**Tradeoff: LLM-based routing vs. classifier model:**
+- LLM-based routing is more flexible and understands nuance, but it's slower and costlier per request
+- A trained classifier (e.g., fine-tuned small model) is faster and cheaper, but needs labeled training data and handles edge cases poorly
+- My recommendation is to start with LLM-based routing since it's simpler to build and easier to iterate on. Once we have enough traffic data, we can move to a hybrid approach where a classifier handles common intents and the LLM handles ambiguous ones.
 
 ### 4.2 Specialist Agents
 
@@ -146,44 +88,44 @@ Each specialist agent has:
 - A focused **system prompt** with domain-specific instructions
 - Access to relevant **knowledge base** sections
 - Access to **customer data** (if authenticated)
-- A defined **scope boundary** — if a query falls outside its domain, it signals the router to re-route
+- A defined **scope boundary** so if a query falls outside its domain, it signals the router to re-route
 
 #### Policy Agent (includes billing)
-- Answers questions about coverage, terms, benefits, exclusions, premiums, billing cycles, payment history
+- Answers questions about coverage, terms, benefits, exclusions, premiums, billing cycles, and payment history
 - Data sources: policy documents (RAG), customer policy records (authed)
 - Key guardrail: must never state coverage exists or doesn't exist without grounding in the actual policy document
 
 #### Claims Agent
-- Answers questions about claims status, required documentation, claims process, timelines
+- Answers questions about claims status, required documentation, the claims process, and timelines
 - Data sources: claims process documentation (RAG), customer claims records (authed)
 - Key guardrail: must not provide legal advice or make promises about claim outcomes
 
 #### FAQ / General Agent
-- Handles general insurance education, product comparisons, "how does insurance work" questions, finding a local agent
-- Data sources: FAQ knowledge base, product pages (RAG only — no customer data needed)
+- Handles general insurance education, product comparisons, "how does insurance work" type questions, and finding a local agent
+- Data sources: FAQ knowledge base, product pages (RAG only, no customer data needed)
 - Lightest guardrail requirements since it doesn't deal with user-specific data
 
-### 4.3 Knowledge & Data Layer
+### 4.3 Knowledge and Data Layer
 
 #### Knowledge Base (RAG)
 
-Serves all agents with grounded, document-backed answers.
+This serves all agents with grounded, document-backed answers.
 
 **Key design decisions:**
-- **Chunking strategy:** Chunk by policy section / logical document boundaries, not arbitrary token windows. Insurance documents have clear sections (e.g., "Coverage A: Dwelling", "Exclusions") — preserve these as atomic retrieval units.
-- **Metadata tagging:** Each chunk is tagged with metadata (document type, product line, section, effective date) to enable filtered retrieval. An agent asking about "auto claims" shouldn't retrieve "homeowner's exclusions."
-- **Retrieval:** Hybrid search — semantic (vector similarity) + keyword (BM25) — to handle both natural language queries and specific term lookups (e.g., policy numbers, coverage codes).
+- **Chunking strategy:** I'd chunk by policy section and logical document boundaries rather than arbitrary token windows. Insurance documents have clear sections (e.g., "Coverage A: Dwelling", "Exclusions"), and these should be preserved as atomic retrieval units.
+- **Metadata tagging:** Each chunk gets tagged with metadata like document type, product line, section, and effective date. This enables filtered retrieval so that an agent asking about "auto claims" doesn't pull back "homeowner's exclusions."
+- **Retrieval:** Hybrid search combining semantic (vector similarity) with keyword (BM25) to handle both natural language queries and specific term lookups (e.g., policy numbers, coverage codes).
 
-**Tradeoff — single vector store vs. per-agent stores:**
-- Single store is simpler to maintain but agents may retrieve irrelevant cross-domain chunks
+**Tradeoff: single vector store vs. per-agent stores:**
+- A single store is simpler to maintain but agents may retrieve irrelevant cross-domain chunks
 - Per-agent stores offer cleaner retrieval but add operational overhead
-- **Recommendation:** Single store with metadata filtering. Simpler, and metadata filters achieve most of the isolation benefit.
+- I'd go with a single store with metadata filtering. It's simpler operationally, and metadata filters give us most of the isolation benefit without the overhead.
 
 #### Customer Data Layer
 
 - Accessed only for authenticated users
-- Provides policy records, claims data, billing information via internal APIs or database queries
-- **Must not expose raw data to the LLM** — a data access service should format/filter data before it reaches the agent (e.g., mask full account numbers, limit fields to what's relevant)
+- Provides policy records, claims data, and billing information via internal APIs or database queries
+- Important: raw data should not be exposed directly to the LLM. A data access service should format and filter the data before it reaches the agent (e.g., mask full account numbers, limit fields to what's relevant for the query)
 
 ### 4.4 Memory System
 
@@ -192,8 +134,8 @@ Serves all agents with grounded, document-backed answers.
 **Approach:** Sliding window + summarization hybrid
 
 - Keep the **last K turns** (e.g., 5-10) verbatim in the context window for recency and detail
-- Everything before that is **summarized into a running episode summary** that gets prepended to the context
-- The summary is updated every N turns (or when the window slides)
+- Everything before that gets **summarized into a running episode summary** that is prepended to the context
+- The summary is updated every N turns or when the window slides
 
 ```
 Context passed to the agent:
@@ -214,31 +156,30 @@ Context passed to the agent:
 | Approach | Pros | Cons |
 |----------|------|------|
 | Full conversation buffer | Maximum accuracy | Hits token limits, expensive |
-| Pure summarization | Token efficient | Lossy — may drop details user refers back to |
+| Pure summarization | Token efficient | Lossy, may drop details user refers back to |
 | **Sliding window + summary** | **Balances both** | **Slightly more complex to implement** |
 
-#### Long-term Memory (Across Sessions — Logged-in Only)
+#### Long-term Memory (Across Sessions, Logged-in Only)
 
 **Approach:** Semantic memory store with user-scoped namespaces
 
-- At the end of each session (or periodically), persist:
-  - **Conversation summary** — what was discussed, what was resolved, what's pending
-  - **User profile context** — extracted facts (e.g., "has 2 auto policies", "asked about roof damage claim 3 times")
-  - **Unresolved issues** — questions the bot couldn't answer or that need follow-up
-- Stored in a **vector database** with user-scoped namespaces (each user's memories are isolated)
-- On new session start, retrieve relevant long-term memories based on the new query's semantic similarity
+- At the end of each session (or periodically), we persist:
+  - **Conversation summary** of what was discussed, what was resolved, and what's pending
+  - **User profile context** with extracted facts (e.g., "has 2 auto policies", "asked about roof damage claim 3 times")
+  - **Unresolved issues** that the bot couldn't answer or that need follow-up
+- Stored in a **vector database** with user-scoped namespaces so each user's memories are isolated
+- On new session start, we retrieve relevant long-term memories based on the new query's semantic similarity
 
-**Why vector DB for long-term memory:**
-- User references to past interactions are semantic ("what did we discuss last time about my claim?") — keyword search fails here
-- Vector similarity finds relevant past context even when phrasing differs
+**Why a vector DB for long-term memory:**
+User references to past interactions are inherently semantic ("what did we discuss last time about my claim?"). Keyword search fails here. Vector similarity finds relevant past context even when the phrasing is completely different.
 
-This can be implemented using solutions like Mem0, or a custom implementation backed by any vector database (Pinecone, Qdrant, Weaviate, pgvector, etc.).
+This can be implemented using solutions like Mem0 or a custom implementation backed by any vector database (Pinecone, Qdrant, Weaviate, pgvector, etc.).
 
 ### 4.5 Guardrails
 
 #### Input Guardrails (Pre-processing)
 
-Applied **before** the query reaches the router:
+Applied before the query reaches the router:
 
 | Check | Purpose | Action |
 |-------|---------|--------|
@@ -249,7 +190,7 @@ Applied **before** the query reaches the router:
 
 #### Output Guardrails (Post-processing)
 
-Applied **after** the specialist agent generates a response, **before** returning to the user:
+Applied after the specialist agent generates a response, before returning to the user:
 
 | Check | Purpose | Action |
 |-------|---------|--------|
@@ -258,31 +199,31 @@ Applied **after** the specialist agent generates a response, **before** returnin
 | Compliance filter | Block responses that could be construed as legal, medical, or financial advice | Rephrase or add caveats |
 | Tone check | Ensure response is professional and empathetic | Rewrite if flagged |
 
-**Tradeoff — guardrails as separate LLM call vs. rule-based:**
-- LLM-based: More flexible, catches nuanced issues, but adds latency and cost
-- Rule-based (regex, keyword matching): Fast and cheap, but brittle
-- **Recommendation:** Rule-based for input guardrails (injection patterns, PII regex), LLM-based for output guardrails (hallucination and compliance checks require understanding context)
+**Tradeoff: guardrails as separate LLM call vs. rule-based:**
+- LLM-based guardrails are more flexible and catch nuanced issues, but they add latency and cost
+- Rule-based guardrails (regex, keyword matching) are fast and cheap, but brittle
+- My approach: use rule-based for input guardrails (injection patterns and PII patterns are well-defined, and speed matters at this stage). Use LLM-based for output guardrails since hallucination and compliance checks require understanding context.
 
 ### 4.6 Human Handoff
 
 **Triggers:**
-- Agent confidence score below threshold (e.g., retrieval similarity score too low)
+- Agent confidence score below a defined threshold (e.g., retrieval similarity score too low)
 - User explicitly asks for a human ("let me talk to someone")
-- Sentiment detection: frustration, anger, repeated same question
+- Sentiment detection picks up frustration, anger, or the user repeating the same question
 - Query involves sensitive topics (complaints, legal disputes, claim denials)
 
 **Handoff flow:**
 1. System informs the user: "Let me connect you with a specialist who can help"
-2. Passes the **conversation summary + context** to the human agent (not raw LLM internals)
-3. Routes to the appropriate human queue (claims team, billing team, general support)
+2. The conversation summary and context are passed to the human agent (not raw LLM internals)
+3. The request gets routed to the appropriate human queue (claims team, billing team, general support)
 
-This is critical for a production system — no chatbot should be a dead-end.
+No chatbot should be a dead-end. Having a clear escalation path is essential for a production system.
 
 ---
 
 ## 5. Observability
 
-Observability is not an afterthought — it's how you debug, improve, and build trust in a multi-agent system. In a multi-agent setup, a single user query passes through multiple components, and without proper tracing, diagnosing failures is nearly impossible.
+Observability is how we debug, improve, and build trust in a multi-agent system. In this kind of setup, a single user query passes through multiple components. Without proper tracing, diagnosing failures becomes nearly impossible.
 
 ### 5.1 What We Observe
 
@@ -303,43 +244,43 @@ Trace: req_abc123
 └── Total latency: 1412ms
 ```
 
-This tells you exactly where time is spent, where failures happen, and which agent handled the query.
+This tells us exactly where time is spent, where failures happen, and which agent handled the query.
 
 #### Metrics
 
-| Metric | Why |
-|--------|-----|
-| **Latency per component** (p50, p95, p99) | Identify bottlenecks — is the LLM slow or is retrieval slow? |
-| **Routing accuracy** | Are queries going to the right agent? Track re-routes and fallbacks |
-| **Retrieval quality** | Top-k similarity scores — are we retrieving relevant chunks? |
-| **Guardrail trigger rates** | How often are input/output guardrails firing? High rates may indicate issues |
-| **Human handoff rate** | If this is too high, the bot isn't doing its job. If too low, it may be overconfident |
+| Metric | Why it matters |
+|--------|---------------|
+| **Latency per component** (p50, p95, p99) | Identifies bottlenecks. Is the LLM slow, or is retrieval slow? |
+| **Routing accuracy** | Are queries going to the right agent? We track re-routes and fallbacks to measure this |
+| **Retrieval quality** | Top-k similarity scores tell us if we're retrieving relevant chunks |
+| **Guardrail trigger rates** | How often are input/output guardrails firing? High rates may indicate upstream issues |
+| **Human handoff rate** | Too high means the bot isn't doing its job. Too low might mean it's being overconfident |
 | **User satisfaction signals** | Thumbs up/down, repeat questions (implicit dissatisfaction), session length |
-| **Token usage per request** | Cost tracking, per agent and total |
+| **Token usage per request** | Cost tracking, broken down per agent and in total |
 
 #### Logs
 
 - Every agent decision (intent classification, confidence score, selected data sources)
 - Guardrail activations with the triggering content (redacted of PII)
-- Memory operations (what was stored, what was retrieved, relevance scores)
+- Memory operations (what was stored, what was retrieved, and relevance scores)
 
 ### 5.2 Approach
 
-Use a **tracing-first** observability platform. For LLM-based systems, tools like **Arize AI**, **LangSmith**, **Langfuse**, or **Phoenix** provide purpose-built observability that standard APM tools (Datadog, New Relic) don't cover well — specifically:
+I'd use a **tracing-first** observability platform. For LLM-based systems, tools like **Arize AI**, **LangSmith**, **Langfuse**, or **Phoenix** provide purpose-built observability that standard APM tools (Datadog, New Relic) don't cover well. Specifically, they offer:
 
 - LLM input/output logging with token counts
 - Retrieval quality metrics (relevance scoring, chunk attribution)
-- Prompt version tracking (which system prompt version produced this response)
+- Prompt version tracking (which system prompt version produced a given response)
 - Evaluation pipelines (automated quality checks on a sample of responses)
 
-**Tradeoff — build vs. buy:**
-- Building custom observability is expensive and distracts from core product
-- LLM observability platforms (Arize, Langfuse) give you 80% of what you need out of the box
-- **Recommendation:** Use an LLM observability platform for tracing and evaluation. Supplement with standard infrastructure monitoring (for API latency, error rates, uptime).
+**Tradeoff: build vs. buy:**
+- Building custom observability is expensive and distracts from the core product
+- LLM observability platforms like Arize or Langfuse give you roughly 80% of what you need out of the box
+- I'd go with an LLM observability platform for tracing and evaluation, and supplement it with standard infrastructure monitoring for API latency, error rates, and uptime.
 
 ### 5.3 Feedback Loop
 
-Observability data feeds back into system improvement:
+Observability data feeds directly into system improvement:
 
 ```
 Observe → Identify low-quality responses → Analyze traces
@@ -353,7 +294,7 @@ This creates a continuous improvement cycle rather than a "deploy and hope" appr
 
 ## 6. Logged-in vs. Logged-out: Unified Architecture
 
-Rather than building two separate systems, we use a **single architecture with an auth-aware router** that adjusts behavior based on user state.
+Rather than building two separate systems, I'm using a single architecture with an auth-aware router that adjusts behavior based on user state.
 
 | Capability | Logged Out | Logged In |
 |-----------|-----------|-----------|
@@ -364,7 +305,7 @@ Rather than building two separate systems, we use a **single architecture with a
 | Billing details | No (prompt to log in) | Yes |
 | Short-term memory | Yes (session only) | Yes (session only) |
 | Long-term memory | No | Yes (cross-session) |
-| Human handoff | Yes | Yes (with context) |
+| Human handoff | Yes | Yes (with full context) |
 
 This avoids duplication while ensuring logged-out users still get value and are nudged toward logging in for personalized help.
 
@@ -372,52 +313,52 @@ This avoids duplication while ensuring logged-out users still get value and are 
 
 ## 7. Key Tradeoffs Summary
 
-| Decision | Option A | Option B | Our Choice | Rationale |
-|----------|----------|----------|------------|-----------|
-| Routing approach | LLM-based | Trained classifier | LLM-based (start), hybrid (later) | Faster to build, iterate with traffic data |
+| Decision | Option A | Option B | My Choice | Rationale |
+|----------|----------|----------|-----------|-----------|
+| Routing approach | LLM-based | Trained classifier | LLM-based initially, hybrid later | Faster to build and iterate. Move to hybrid once we have traffic data |
 | Memory strategy | Full buffer | Pure summary | Sliding window + summary hybrid | Balances accuracy and token efficiency |
-| RAG store topology | Per-agent stores | Single shared store | Single store + metadata filtering | Simpler ops, metadata filters give sufficient isolation |
-| Input guardrails | LLM-based | Rule-based | Rule-based | Injection/PII patterns are well-defined; speed matters here |
+| RAG store topology | Per-agent stores | Single shared store | Single store + metadata filtering | Simpler ops, metadata filters provide sufficient isolation |
+| Input guardrails | LLM-based | Rule-based | Rule-based | Injection/PII patterns are well-defined; speed matters at this stage |
 | Output guardrails | LLM-based | Rule-based | LLM-based | Compliance/hallucination checks need contextual understanding |
-| Observability | Build custom | Use platform | LLM observability platform | Build vs. buy — platforms give 80% of value, focus engineering on core product |
-| Auth handling | Two separate systems | Single auth-aware system | Single auth-aware system | Less duplication, simpler maintenance |
+| Observability | Build custom | Use platform | LLM observability platform | Platforms give 80% of the value; focus engineering effort on the core product |
+| Auth handling | Two separate systems | Single auth-aware system | Single auth-aware system | Less duplication, simpler to maintain |
 
 ---
 
-## 8. Failure Modes & Mitigations
+## 8. Failure Modes and Mitigations
 
 | Failure | Impact | Mitigation |
 |---------|--------|------------|
-| LLM hallucination about coverage | High — user acts on wrong info | Output guardrails + grounding check + disclaimers |
-| Router misclassifies intent | Medium — wrong agent responds | Agents detect out-of-scope queries and signal re-route |
-| RAG retrieves irrelevant chunks | Medium — inaccurate response | Metadata filtering + relevance threshold cutoff |
-| Customer data service is down | High — can't answer personalized queries | Graceful degradation: fall back to generic answers + inform user |
-| LLM provider outage | Critical — full outage | Canned responses for common queries as fallback + human handoff |
-| Memory store corruption/loss | Low — degraded personalization | Memory is supplementary, not critical path. System works without it |
+| LLM hallucination about coverage | High: user acts on wrong info | Output guardrails + grounding check + disclaimers |
+| Router misclassifies intent | Medium: wrong agent responds | Agents detect out-of-scope queries and signal re-route |
+| RAG retrieves irrelevant chunks | Medium: inaccurate response | Metadata filtering + relevance threshold cutoff |
+| Customer data service is down | High: can't answer personalized queries | Graceful degradation: fall back to generic answers + inform user |
+| LLM provider outage | Critical: full outage | Canned responses for common queries as fallback + human handoff |
+| Memory store corruption/loss | Low: degraded personalization | Memory is supplementary, not on the critical path. System works without it |
 
 ---
 
 ## 9. Future Considerations (Out of Scope)
 
-These are intentionally excluded from the current design but worth calling out:
+These are intentionally excluded from the current design but worth noting:
 
-- **Action-taking agents** — filing claims, making payments, updating policy details
-- **Multi-language support** — serving non-English speaking customers
-- **Voice channel** — extending the chatbot to phone/IVR systems
-- **A/B testing framework** — testing different prompts, agent configurations, retrieval strategies
-- **Fine-tuned models** — replacing general-purpose LLMs with insurance-domain fine-tuned models for specialist agents
+- **Action-taking agents** for filing claims, making payments, updating policy details
+- **Multi-language support** for serving non-English speaking customers
+- **Voice channel** to extend the chatbot to phone/IVR systems
+- **A/B testing framework** for testing different prompts, agent configurations, and retrieval strategies
+- **Fine-tuned models** to replace general-purpose LLMs with insurance-domain specific models for specialist agents
 
 ---
 
 ## 10. Summary
 
-This design provides a **pragmatic multi-agent architecture** that:
+This design provides a pragmatic multi-agent architecture that:
 
-- **Decomposes cleanly** into 4 agents (router + 3 specialists) with clear boundaries
-- **Handles both user states** through a unified, auth-aware routing system
-- **Manages memory intelligently** with a hybrid short-term strategy and semantic long-term store
-- **Prioritizes safety** with layered guardrails (input + output) appropriate for the insurance domain
-- **Enables continuous improvement** through comprehensive observability and feedback loops
-- **Degrades gracefully** with human handoff as the ultimate fallback
+- Decomposes into 4 agents (router + 3 specialists) with clear boundaries
+- Handles both authenticated and anonymous users through a unified, auth-aware routing system
+- Manages memory with a hybrid short-term strategy and semantic long-term store
+- Prioritizes safety with layered guardrails (input + output) appropriate for the insurance domain
+- Enables continuous improvement through comprehensive observability and feedback loops
+- Degrades gracefully with human handoff as the ultimate fallback
 
-The architecture is tech-stack agnostic and can be implemented using any LLM provider, vector database, and programming language. The key insight is not the specific tools but the **separation of concerns** — each component has a clear responsibility, a defined interface, and can be independently improved or replaced.
+The architecture is tech-stack agnostic and can be implemented with any LLM provider, vector database, and programming language. The core value is in the separation of concerns: each component has a clear responsibility, a defined interface, and can be independently improved or replaced.
